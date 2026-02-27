@@ -57,7 +57,7 @@ jobs:
 
           # Přidej to, co chceš mít verzované:
           git add docs/index.html
-          git add docs/*png
+          git add docs/*.png
 
           # Pokud chceš mít v historii i sklizená data, odkomentuj:
           git add records/*.jsonl.gz
