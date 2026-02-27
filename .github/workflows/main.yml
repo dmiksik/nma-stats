@@ -1,0 +1,49 @@
+name: NMA stats
+
+on:
+  schedule:
+    - cron: "0 3 * * *"   # každý den v 03:00 UTC
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install matplotlib requests
+
+      - name: Harvest fresh NMA records
+        run: |
+          mkdir -p records
+          # začneme čistě – smažeme starý soubor i checkpoint z předchozího běhu
+          rm -f records/nma_records.jsonl records/nma_records.jsonl.gz nma_checkpoint.json
+
+          python nma-harvest.py \
+            --base-url https://nma.eosc.cz/api/records \
+            --out records/nma_records.jsonl.gz \
+            --checkpoint nma_checkpoint.json \
+            --size 50 \
+            --sort oldest \
+            --min-delay 0.5 \
+            --max-delay 1.5
+
+      - name: Generate stats & calendar
+        run: |
+          mkdir -p docs
+          python stats/created_calendar.py \
+            --in records/nma_records.jsonl.gz \
+            --start-date 2026-01-12 \
+            --summary-from 2026-01-16 \
+            --end-date $(date -u +%Y-%m-%d) \
+            --html-out docs/index.html
