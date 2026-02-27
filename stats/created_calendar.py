@@ -1,306 +1,295 @@
 #!/usr/bin/env python3
 import argparse
-import csv
 import gzip
 import json
-from datetime import datetime, date, timedelta
 import math
+from collections import Counter
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Dict, Tuple
+
 from urllib.parse import quote
 
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.colors as mcolors
+import numpy as np
 
 
-def open_in(path: str):
-    """Otevře vstupní JSONL nebo JSONL.GZ podle přípony."""
-    if path.endswith(".gz"):
+# EOSC barvy
+EOSC_GREY = "#e4e4e3"
+EOSC_GREEN = "#008691"
+EOSC_PINK = "#ff5b7f"
+EOSC_CMAP = mcolors.LinearSegmentedColormap.from_list(
+    "eosc", [EOSC_GREY, EOSC_GREEN, EOSC_PINK]
+)
+
+
+def open_any(path: Path):
+    """Otevře JSONL nebo JSONL.GZ pro čtení textu."""
+    if str(path).endswith(".gz"):
         return gzip.open(path, "rt", encoding="utf-8")
     return open(path, "r", encoding="utf-8")
 
 
-def parse_args():
-    ap = argparse.ArgumentParser(
-        description=(
-            "Spočítá počty záznamů podle pole 'created', vykreslí kalendářový heatmap "
-            "a vygeneruje HTML s klikacími dny do NMA "
-            "(větev A: všechny záznamy, větev B: jen metadata.publication_date 2021–2025)."
-        )
-    )
-    ap.add_argument(
-        "--in",
-        dest="inp",
-        required=True,
-        help="Vstupní JSONL (.jsonl nebo .jsonl.gz), každý řádek = jeden záznam.",
-    )
-    # první datum v kalendářové mřížce (týden začíná tady)
-    ap.add_argument(
-        "--start-date",
-        default="2026-01-12",
-        help="První datum v kalendářové mřížce (YYYY-MM-DD), default 2026-01-12.",
-    )
-    # od kdy tě zajímá textový výpis a CSV/JSON
-    ap.add_argument(
-        "--summary-from",
-        default="2026-01-16",
-        help="První datum zahrnuté v CSV/JSON výpisu (YYYY-MM-DD), default 2026-01-16.",
-    )
-    ap.add_argument(
-        "--end-date",
-        default=None,
-        help="Poslední datum (YYYY-MM-DD). Pokud není, vezme se dnešní den.",
-    )
-    # výstupy pro větev A (všechny záznamy)
-    ap.add_argument(
-        "--csv-out",
-        default="stats/created_by_day.csv",
-        help="Výstupní CSV (všechny záznamy) s počty created/den (default: stats/created_by_day.csv).",
-    )
-    ap.add_argument(
-        "--json-out",
-        default="stats/created_by_day.json",
-        help="Výstupní JSON (všechny záznamy) s počty created/den (default: stats/created_by_day.json).",
-    )
-    ap.add_argument(
-        "--png-out",
-        default="stats/created_calendar.png",
-        help="Výstupní PNG (všechny záznamy) s kalendářovým grafem (default: stats/created_calendar.png).",
-    )
-    # výstupy pro větev B (jen publication_date 2021–2025)
-    ap.add_argument(
-        "--csv-out-pub",
-        default="stats/created_by_day_pub2021_2025.csv",
-        help="Výstupní CSV (jen publication_date 2021–2025) (default: stats/created_by_day_pub2021_2025.csv).",
-    )
-    ap.add_argument(
-        "--json-out-pub",
-        default="stats/created_by_day_pub2021_2025.json",
-        help="Výstupní JSON (jen publication_date 2021–2025) (default: stats/created_by_day_pub2021_2025.json).",
-    )
-    ap.add_argument(
-        "--png-out-pub",
-        default="stats/created_calendar_pub2021_2025.png",
-        help="Výstupní PNG (jen publication_date 2021–2025) (default: stats/created_calendar_pub2021_2025.png).",
-    )
-    # HTML výstup
-    ap.add_argument(
-        "--html-out",
-        default="stats/created_calendar.html",
-        help="Výstupní HTML stránka s kalendáři a odkazy do NMA (default: stats/created_calendar.html).",
-    )
-    # základní URL pro vyhledávání v NMA
-    ap.add_argument(
-        "--nma-search-base",
-        default="https://nma.eosc.cz/datasets/",
-        help="Základní URL pro vyhledávání v NMA (default: https://nma.eosc.cz/datasets/).",
-    )
-    return ap.parse_args()
+def format_int_cz(n: int) -> str:
+    """Tisíce oddělené mezerou podle CZ konvence."""
+    return f"{n:,}".replace(",", " ")
 
 
-def format_int_cz(value: int) -> str:
-    """Formátuje celé číslo podle české konvence: tisíce oddělené mezerou."""
-    return f"{value:,}".replace(",", " ")
+def iter_records(path: Path):
+    """Iterátor přes záznamy v JSONL."""
+    with open_any(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                yield json.loads(line)
+            except json.JSONDecodeError:
+                continue
 
 
-# --- barevná škála pro HTML (šedá -> zelená -> růžová) ---
+def parse_created(rec: dict) -> date | None:
+    """Vrátí datum z pole 'created' jako date."""
+    created = rec.get("created")
+    if not created:
+        return None
+    # Normalize 'Z' to +00:00
+    created = created.replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(created)
+        return dt.date()
+    except ValueError:
+        return None
 
 
-GREY = (0xE4, 0xE4, 0xE3)
-GREEN = (0x00, 0x86, 0x91)
-PINK = (0xFF, 0x5B, 0x7F)
+def get_publication_year(rec: dict) -> int | None:
+    """Vrátí rok z metadata.publication_date, pokud jde rozumně přečíst."""
+    meta = rec.get("metadata") or {}
+    pub = meta.get("publication_date")
+    if not pub or len(pub) < 4:
+        return None
+    try:
+        return int(pub[:4])
+    except ValueError:
+        return None
 
 
-def _blend(c1, c2, t: float):
-    r = round(c1[0] + (c2[0] - c1[0]) * t)
-    g = round(c1[1] + (c2[1] - c1[1]) * t)
-    b = round(c1[2] + (c2[2] - c1[2]) * t)
-    return max(0, min(255, r)), max(0, min(255, g)), max(0, min(255, b))
+def collect_counts(
+    path: Path,
+    start_date: date,
+    end_date: date,
+    pub_year_min: int = 2021,
+    pub_year_max: int = 2025,
+) -> Tuple[Dict[date, int], Dict[date, int]]:
+    """Spočítá denní počty created pro všechny a pro 2021–2025."""
+    counts_all: Counter[date] = Counter()
+    counts_pub: Counter[date] = Counter()
 
-
-def color_for_value(value: int, vmin: int, vmax: int) -> str:
-    """Vrátí hex barvu pro danou hodnotu podle EOSC škály."""
-    if vmax <= vmin:
-        return "#e4e4e3"
-    norm = (value - vmin) / (vmax - vmin)
-    norm = max(0.0, min(1.0, norm))
-    if norm <= 0.5:
-        t = norm / 0.5
-        rgb = _blend(GREY, GREEN, t)
-    else:
-        t = (norm - 0.5) / 0.5
-        rgb = _blend(GREEN, PINK, t)
-    return "#{:02x}{:02x}{:02x}".format(*rgb)
-
-
-def text_color_for_rgb(rgb) -> str:
-    r, g, b = [c / 255.0 for c in rgb]
-    luminance = 0.299 * r + 0.587 * g + 0.114 * b
-    return "black" if luminance > 0.5 else "white"
-
-
-def compute_scale(counts: dict[date, int], start_date: date, end_date: date, ignore_for_scale: date | None):
-    values = []
-    for d, v in counts.items():
+    for rec in iter_records(path):
+        d = parse_created(rec)
+        if not d:
+            continue
         if d < start_date or d > end_date:
             continue
-        if ignore_for_scale is not None and d == ignore_for_scale:
+
+        counts_all[d] += 1
+
+        y = get_publication_year(rec)
+        if y is not None and pub_year_min <= y <= pub_year_max:
+            counts_pub[d] += 1
+
+    # Doplnit nuly pro dny bez záznamů
+    counts_all_full: Dict[date, int] = {}
+    counts_pub_full: Dict[date, int] = {}
+    cur = start_date
+    while cur <= end_date:
+        counts_all_full[cur] = counts_all.get(cur, 0)
+        counts_pub_full[cur] = counts_pub.get(cur, 0)
+        cur += timedelta(days=1)
+
+    return counts_all_full, counts_pub_full
+
+
+def compute_scale(
+    counts: Dict[date, int],
+    start_date: date,
+    end_date: date,
+    ignore_for_scale: date | None = None,
+) -> Tuple[int, int]:
+    """Najde min/max pro škálu, s možností ignorovat jeden den."""
+    vals = []
+    cur = start_date
+    while cur <= end_date:
+        if ignore_for_scale is not None and cur == ignore_for_scale:
+            cur += timedelta(days=1)
             continue
-        values.append(v)
-    if values:
-        vmin = min(values)
-        vmax = max(values)
-        if vmin == vmax:
-            vmax = vmin + 1
-    else:
-        vmin, vmax = 0, 1
+        vals.append(counts.get(cur, 0))
+        cur += timedelta(days=1)
+
+    vals = [v for v in vals if v is not None]
+    if not vals:
+        return 0, 1
+    vmin = min(vals)
+    vmax = max(vals)
+    if vmin == vmax:
+        # zabránit delení nulou; posunout trochu
+        vmin = 0
+        vmax = max(vmax, 1)
     return vmin, vmax
 
 
-# --- PNG kalendář pomocí matplotlib ---
+def color_for_value(value: int, vmin: int, vmax: int) -> str:
+    """Vrátí hex barvu podle EOSC colormapy."""
+    if vmax <= vmin:
+        t = 0.0
+    else:
+        t = (value - vmin) / (vmax - vmin)
+    t = max(0.0, min(1.0, float(t)))
+    rgb = EOSC_CMAP(t)
+    return mcolors.to_hex(rgb)
 
 
-def make_calendar_png(
-    counts: dict[date, int],
+def text_color_for_rgb(rgb: Tuple[int, int, int]) -> str:
+    """Černý nebo bílý text podle jasu pozadí."""
+    r, g, b = rgb
+    # jednoduchý luminance odhad
+    luminance = 0.299 * r + 0.587 * g + 0.114 * b
+    return "black" if luminance > 140 else "white"
+
+
+def save_calendar_png(
+    counts: Dict[date, int],
     start_date: date,
     end_date: date,
-    png_out: str,
     title: str,
+    png_path: Path,
     ignore_for_scale: date | None = None,
 ):
-    # 3) Kalendářová mřížka (7 dní v týdnu, řádky = týdny)
-    n_days = (end_date - start_date).days + 1
-    n_rows = math.ceil(n_days / 7)
-
-    grid = [[0 for _ in range(7)] for _ in range(n_rows)]
-    date_map = [[None for _ in range(7)] for _ in range(n_rows)]
-
-    current = start_date
-    for idx in range(n_days):
-        r = idx // 7
-        c = idx % 7
-        d = current
-        grid[r][c] = counts.get(d, 0)
-        date_map[r][c] = d
-        current += timedelta(days=1)
+    """Uloží heatmap kalendář jako PNG do dané cesty."""
+    png_path.parent.mkdir(parents=True, exist_ok=True)
 
     vmin, vmax = compute_scale(counts, start_date, end_date, ignore_for_scale)
 
-    fig, ax = plt.subplots(figsize=(10, 2 + 0.6 * n_rows))
+    num_days = (end_date - start_date).days + 1
+    num_weeks = math.ceil(num_days / 7)
 
-    # EOSC barevná škála: šedá -> zelená -> růžová
-    eosc_cmap = LinearSegmentedColormap.from_list(
-        "eosc",
-        ["#e4e4e3", "#008691", "#ff5b7f"]
-    )
+    values = np.zeros((num_weeks, 7), dtype=int)
+    labels_date = [["" for _ in range(7)] for _ in range(num_weeks)]
+    labels_count = [["" for _ in range(7)] for _ in range(num_weeks)]
 
-    im = ax.imshow(grid, cmap=eosc_cmap, vmin=vmin, vmax=vmax)
+    for i in range(num_days):
+        d = start_date + timedelta(days=i)
+        week = i // 7
+        dow = i % 7  # 0–6
 
-    # Popisky os
+        cnt = counts.get(d, 0)
+        values[week, dow] = cnt
+        labels_date[week][dow] = f"{d.day}.{d.month}."
+        labels_count[week][dow] = format_int_cz(cnt) if cnt > 0 else ""
+
+    fig_height = max(3.0, num_weeks * 0.6 + 1.5)
+    fig, ax = plt.subplots(figsize=(10, fig_height))
+
+    im = ax.imshow(values, cmap=EOSC_CMAP, aspect="auto", vmin=vmin, vmax=vmax)
+
+    # Osy
     ax.set_xticks(range(7))
     ax.set_xticklabels(["Po", "Út", "St", "Čt", "Pá", "So", "Ne"])
-    ax.set_yticks(range(n_rows))
-    ax.set_yticklabels([f"Týden {i+1}" for i in range(n_rows)])
-
-    # Obrátit osu y tak, aby první týden byl nahoře
-    ax.set_ylim(n_rows - 0.5, -0.5)
-    ax.set_xlim(-0.5, 6.5)
+    ax.set_yticks([])
 
     ax.set_title(title)
 
-    norm = im.norm
-    cmap = im.cmap
+    # Popisky v buňkách
+    for week in range(num_weeks):
+        for dow in range(7):
+            cnt = int(values[week, dow])
+            # pozadí
+            color_hex = color_for_value(cnt, vmin, vmax)
+            r = int(color_hex[1:3], 16)
+            g = int(color_hex[3:5], 16)
+            b = int(color_hex[5:7], 16)
 
-    for r in range(n_rows):
-        for c in range(7):
-            d = date_map[r][c]
-            if d is None:
-                continue
-            count = grid[r][c]
-
-            date_label = f"{d.day}.{d.month}."
-            norm_val = norm(count)
-            rgba = cmap(norm_val)
-            luminance = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-            text_color = "black" if luminance > 0.5 else "white"
-            if norm_val > 0.66:
+            if vmax > vmin:
+                norm = (cnt - vmin) / (vmax - vmin)
+            else:
+                norm = 0.0
+            text_color = text_color_for_rgb((r, g, b))
+            if norm > 0.66:
                 text_color = "white"
 
+            # datum
             ax.text(
-                c,
-                r - 0.15,
-                date_label,
-                ha="center",
-                va="center",
-                fontsize=7,
-                fontweight="bold",
-                color=text_color,
-            )
-            ax.text(
-                c,
-                r + 0.2,
-                format_int_cz(count),
+                dow,
+                week - 0.15,
+                labels_date[week][dow],
                 ha="center",
                 va="center",
                 fontsize=6,
                 color=text_color,
             )
+            # počet
+            ax.text(
+                dow,
+                week + 0.18,
+                labels_count[week][dow],
+                ha="center",
+                va="center",
+                fontsize=5,
+                color=text_color,
+            )
 
-    Path(png_out).parent.mkdir(parents=True, exist_ok=True)
-    plt.tight_layout()
-    fig.savefig(png_out, dpi=150)
+    # mřížka "čtverečků"
+    ax.set_xticks(np.arange(-0.5, 7, 1), minor=True)
+    ax.set_yticks(np.arange(-0.5, num_weeks, 1), minor=True)
+    ax.grid(which="minor", color="white", linewidth=0.5)
+    ax.tick_params(which="both", length=0)
+
+    fig.tight_layout()
+    fig.savefig(png_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
-# --- HTML kalendář s klikacími dny ---
-
-
 def generate_html(
-    counts_all: dict[date, int],
-    counts_pub: dict[date, int],
+    counts_all: Dict[date, int],
+    counts_pub: Dict[date, int],
     start_date: date,
     end_date: date,
     summary_from: date,
-    html_out: str,
+    html_out: Path,
     nma_search_base: str,
+    png_all: str | None = None,
+    png_pub: str | None = None,
     ignore_for_scale: date | None = None,
 ):
     """
-    Vygeneruje HTML stránku se dvěma kalendáři:
-    - counts_all = všechny záznamy
-    - counts_pub = jen publication_date 2021–2025
+    Vygeneruje HTML stránku se dvěma kalendáři (vše / 2021–2025)
+    a případně odkazy na PNG grafy.
     """
 
-    def build_calendar_section(title: str, counts: dict[date, int], filter_query: str | None = None):
-        """
-        filter_query – volitelný kus dotazu, který se přidá za created:
-        např. "metadata.publication_date:[2021 TO 2025]"
-        → výsledný dotaz: created:[... TO ...] AND metadata.publication_date:[2021 TO 2025]
-        """
+    def section_calendar(title: str, counts: Dict[date, int], filter_query: str | None):
         vmin, vmax = compute_scale(counts, start_date, end_date, ignore_for_scale)
 
-        # dny v pořadí
-        days = []
+        days_html = []
         current = start_date
         while current <= end_date:
-            count = counts.get(current, 0)
-            color_hex = color_for_value(count, vmin, vmax)
-            # textová barva
-            rgb = (
-                int(color_hex[1:3], 16),
-                int(color_hex[3:5], 16),
-                int(color_hex[5:7], 16),
-            )
-            text_color = text_color_for_rgb(rgb)
-            # když jsme blízko horní části škály (růžové), nutný bílý text
+            cnt = counts.get(current, 0)
+            color_hex = color_for_value(cnt, vmin, vmax)
+
+            r = int(color_hex[1:3], 16)
+            g = int(color_hex[3:5], 16)
+            b = int(color_hex[5:7], 16)
+            text_color = text_color_for_rgb((r, g, b))
             if vmax > vmin:
-                norm = (count - vmin) / (vmax - vmin)
-                if norm > 0.66:
-                    text_color = "white"
+                norm = (cnt - vmin) / (vmax - vmin)
+            else:
+                norm = 0.0
+            if norm > 0.66:
+                text_color = "white"
 
             date_label = f"{current.day}.{current.month}."
             date_iso = current.isoformat()
 
-            # základ dotazu: created:[YYYY-MM-DD TO YYYY-MM-DD]
             if filter_query:
                 term = f"created:[{date_iso} TO {date_iso}] AND {filter_query}"
             else:
@@ -309,16 +298,15 @@ def generate_html(
             q = quote(term, safe="")
             url = f"{nma_search_base}?q={q}"
 
-            days.append(
+            days_html.append(
                 f'<a class="day" href="{url}" target="_blank" '
                 f'style="background-color: {color_hex}; color: {text_color};">'
                 f'<span class="date">{date_label}</span>'
-                f'<span class="count">{format_int_cz(count)}</span>'
+                f'<span class="count">{format_int_cz(cnt)}</span>'
                 f'</a>'
             )
             current += timedelta(days=1)
 
-        # hlavička dnů v týdnu
         dow_header = "".join(
             f'<div class="dow">{label}</div>'
             for label in ["Po", "Út", "St", "Čt", "Pá", "So", "Ne"]
@@ -330,12 +318,32 @@ def generate_html(
             f'  <p class="hint">Kliknutím na den se otevře vyhledávání v NMA pro dané datum.</p>\n'
             f'  <div class="calendar-grid">\n'
             f'{dow_header}\n'
-            f'{"".join(days)}\n'
+            f'{"".join(days_html)}\n'
             f'  </div>\n'
             f'</section>\n'
         )
 
     updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
+
+    extra_png_section = ""
+    if png_all or png_pub:
+        items = []
+        if png_all:
+            items.append(
+                f'<li><a href="{png_all}">PNG: všechny záznamy (created)</a></li>'
+            )
+        if png_pub:
+            items.append(
+                f'<li><a href="{png_pub}">PNG: jen metadata.publication_date 2021–2025</a></li>'
+            )
+        extra_png_section = (
+            "<section class=\"png-section\">\n"
+            "  <h2>Obrázky ke stažení</h2>\n"
+            "  <ul>\n"
+            f"    {'\n    '.join(items)}\n"
+            "  </ul>\n"
+            "</section>\n"
+        )
 
     html = f"""<!DOCTYPE html>
 <html lang="cs">
@@ -349,7 +357,7 @@ def generate_html(
       --border-color: #dddddd;
       --text-main: #222222;
       --text-muted: #555555;
-      --link: #008691;
+      --link: {EOSC_GREEN};
     }}
 
     * {{ box-sizing: border-box; }}
@@ -467,9 +475,18 @@ def generate_html(
       display: inline-flex;
       height: 10px;
       width: 120px;
-      background: linear-gradient(to right, #e4e4e3, #008691, #ff5b7f);
+      background: linear-gradient(to right, {EOSC_GREY}, {EOSC_GREEN}, {EOSC_PINK});
       border-radius: 999px;
       border: 1px solid rgba(0,0,0,0.08);
+    }}
+
+    .png-section {{
+      margin-top: 1.5rem;
+      margin-bottom: 1.5rem;
+    }}
+
+    .png-section ul {{
+      padding-left: 1.2rem;
     }}
 
     @media (max-width: 700px) {{
@@ -498,11 +515,13 @@ def generate_html(
       <span>méně záznamů → více záznamů</span>
     </div>
 
-    {build_calendar_section("Všechny záznamy (pole created)", counts_all, None)}
+    {section_calendar("Všechny záznamy (pole created)", counts_all, None)}
 
-    {build_calendar_section("Jen záznamy s metadata.publication_date v letech 2021–2025",
-                            counts_pub,
-                            "metadata.publication_date:[2021 TO 2025]")}
+    {section_calendar("Jen záznamy s metadata.publication_date v letech 2021–2025",
+                     counts_pub,
+                     "metadata.publication_date:[2021 TO 2025]")}
+
+    {extra_png_section}
 
     <p class="meta">
       Data: JSONL sklizeň z <a href="https://nma.eosc.cz" target="_blank" rel="noopener">NMA</a>.
@@ -513,159 +532,152 @@ def generate_html(
 </html>
 """
 
-    Path(html_out).parent.mkdir(parents=True, exist_ok=True)
+    html_out.parent.mkdir(parents=True, exist_ok=True)
     with open(html_out, "w", encoding="utf-8") as f:
         f.write(html)
+
+
+def write_summaries(
+    counts_all: Dict[date, int],
+    counts_pub: Dict[date, int],
+    summary_from: date,
+    stats_dir: Path,
+):
+    stats_dir.mkdir(parents=True, exist_ok=True)
+
+    def to_lines(counts: Dict[date, int]):
+        for d in sorted(counts.keys()):
+            if d < summary_from:
+                continue
+            yield d, counts[d]
+
+    # CSV
+    with open(stats_dir / "created_counts_all.csv", "w", encoding="utf-8") as f:
+        f.write("date,created_count\n")
+        for d, cnt in to_lines(counts_all):
+            f.write(f"{d.isoformat()},{cnt}\n")
+
+    with open(
+        stats_dir / "created_counts_pub_2021_2025.csv", "w", encoding="utf-8"
+    ) as f:
+        f.write("date,created_count\n")
+        for d, cnt in to_lines(counts_pub):
+            f.write(f"{d.isoformat()},{cnt}\n")
+
+    # JSON
+    json_all = [
+        {"date": d.isoformat(), "created_count": cnt}
+        for d, cnt in to_lines(counts_all)
+    ]
+    json_pub = [
+        {"date": d.isoformat(), "created_count": cnt}
+        for d, cnt in to_lines(counts_pub)
+    ]
+
+    with open(stats_dir / "created_counts_all.json", "w", encoding="utf-8") as f:
+        json.dump(json_all, f, ensure_ascii=False, indent=2)
+
+    with open(
+        stats_dir / "created_counts_pub_2021_2025.json", "w", encoding="utf-8"
+    ) as f:
+        json.dump(json_pub, f, ensure_ascii=False, indent=2)
+
+
+def parse_args():
+    ap = argparse.ArgumentParser(
+        description=(
+            "Spočítá denní počty created a vygeneruje CSV, JSON, PNG kalendáře "
+            "a HTML stránku."
+        )
+    )
+    ap.add_argument(
+        "--in",
+        dest="input",
+        required=True,
+        help="Vstupní JSONL soubor (může být .gz).",
+    )
+    ap.add_argument(
+        "--start-date",
+        required=True,
+        help="Počáteční datum (YYYY-MM-DD) – začátek kalendáře.",
+    )
+    ap.add_argument(
+        "--end-date",
+        required=True,
+        help="Koncové datum (YYYY-MM-DD) – konec kalendáře.",
+    )
+    ap.add_argument(
+        "--summary-from",
+        required=True,
+        help="Od kterého dne zapisovat textové souhrny (YYYY-MM-DD).",
+    )
+    ap.add_argument(
+        "--html-out",
+        required=True,
+        help="Cesta k výstupnímu HTML souboru (např. docs/index.html).",
+    )
+    ap.add_argument(
+        "--nma-search-base",
+        default="https://nma.eosc.cz/datasets/",
+        help="Základ URL pro NMA search (default: https://nma.eosc.cz/datasets/).",
+    )
+    return ap.parse_args()
+
 
 def main():
     args = parse_args()
 
-    start_date = datetime.strptime(args.start_date, "%Y-%m-%d").date()
-    summary_from = datetime.strptime(args.summary_from, "%Y-%m-%d").date()
+    input_path = Path(args.input)
+    html_out = Path(args.html_out)
+    stats_dir = Path("stats")
 
-    if args.end_date:
-        end_date = datetime.strptime(args.end_date, "%Y-%m-%d").date()
-    else:
-        end_date = date.today()
+    start_date = date.fromisoformat(args.start_date)
+    end_date = date.fromisoformat(args.end_date)
+    summary_from = date.fromisoformat(args.summary_from)
 
-    if summary_from < start_date:
-        raise ValueError("summary-from nesmí být dřív než start-date")
+    # den, který ignorujeme v barvové škále (16. 1. 2026)
+    ignore_for_scale = date(2026, 1, 16)
 
-    # 1) spočítat počty podle 'created'
-    counts_all: dict[date, int] = {}   # větev A: všechny záznamy
-    counts_pub: dict[date, int] = {}   # větev B: jen publication_date 2021–2025
+    counts_all, counts_pub = collect_counts(input_path, start_date, end_date)
 
-    with open_in(args.inp) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError:
-                continue
+    # textové výstupy
+    write_summaries(counts_all, counts_pub, summary_from, stats_dir)
 
-            created_str = rec.get("created")
-            if not created_str:
-                continue
+    # PNG do stejného adresáře jako HTML => docs/
+    out_dir = html_out.parent
+    png_all_path = out_dir / "calendar_created_all.png"
+    png_pub_path = out_dir / "calendar_created_pub_2021_2025.png"
 
-            created_str_norm = created_str.replace("Z", "+00:00")
-            try:
-                dt = datetime.fromisoformat(created_str_norm)
-            except ValueError:
-                continue
-
-            d = dt.date()
-            if d < start_date or d > end_date:
-                continue
-
-            # VĚTEV A: všechny záznamy
-            counts_all[d] = counts_all.get(d, 0) + 1
-
-            # VĚTEV B: jen záznamy s metadata.publication_date roky 2021–2025
-            md = rec.get("metadata") or {}
-            pub_date_str = (md.get("publication_date") or "").strip()
-            if pub_date_str:
-                year_str = pub_date_str[:4]
-                try:
-                    year = int(year_str)
-                except ValueError:
-                    year = None
-                if year is not None and 2021 <= year <= 2025:
-                    counts_pub[d] = counts_pub.get(d, 0) + 1
-
-    # doplnit nuly pro dny, kde nic nevzniklo (v obou větvích)
-    current = start_date
-    while current <= end_date:
-        counts_all.setdefault(current, 0)
-        counts_pub.setdefault(current, 0)
-        current += timedelta(days=1)
-
-    # 2) CSV + JSON výpis (jen od summary_from do end_date)
-
-    rows_all = sorted(counts_all.items())
-    rows_summary_all = [(d, c) for (d, c) in rows_all if d >= summary_from]
-
-    rows_pub = sorted(counts_pub.items())
-    rows_summary_pub = [(d, c) for (d, c) in rows_pub if d >= summary_from]
-
-    Path(args.csv_out).parent.mkdir(parents=True, exist_ok=True)
-
-    # CSV – větev A
-    with open(args.csv_out, "w", encoding="utf-8", newline="") as f_csv:
-        w = csv.writer(f_csv)
-        w.writerow(["date", "created_count_all"])
-        for d, c in rows_summary_all:
-            w.writerow([d.isoformat(), c])
-
-    # CSV – větev B
-    with open(args.csv_out_pub, "w", encoding="utf-8", newline="") as f_csv:
-        w = csv.writer(f_csv)
-        w.writerow(["date", "created_count_pub2021_2025"])
-        for d, c in rows_summary_pub:
-            w.writerow([d.isoformat(), c])
-
-    # JSON – větev A
-    summary_dict_all = {d.isoformat(): c for d, c in rows_summary_all}
-    with open(args.json_out, "w", encoding="utf-8") as f_json:
-        json.dump(summary_dict_all, f_json, ensure_ascii=False, indent=2)
-
-    # JSON – větev B
-    summary_dict_pub = {d.isoformat(): c for d, c in rows_summary_pub}
-    with open(args.json_out_pub, "w", encoding="utf-8") as f_json:
-        json.dump(summary_dict_pub, f_json, ensure_ascii=False, indent=2)
-
-    # rychlá kontrola do stdout
-    print("=== VĚTEV A: všechny záznamy ===")
-    print("date,created_count_all")
-    for d, c in rows_summary_all:
-        print(f"{d.isoformat()},{c}")
-
-    print("\n=== VĚTEV B: jen publication_date 2021–2025 ===")
-    print("date,created_count_pub2021_2025")
-    for d, c in rows_summary_pub:
-        print(f"{d.isoformat()},{c}")
-
-    ignore_date = date(2026, 1, 16)
-
-    # PNG kalendáře
-    make_calendar_png(
-        counts=counts_all,
-        start_date=start_date,
-        end_date=end_date,
-        png_out=args.png_out,
-        title="Počty záznamů podle pole 'created' (všechny záznamy)",
-        ignore_for_scale=ignore_date,
+    save_calendar_png(
+        counts_all,
+        start_date,
+        end_date,
+        "Všechny záznamy (created)",
+        png_all_path,
+        ignore_for_scale=ignore_for_scale,
+    )
+    save_calendar_png(
+        counts_pub,
+        start_date,
+        end_date,
+        "Jen metadata.publication_date 2021–2025",
+        png_pub_path,
+        ignore_for_scale=ignore_for_scale,
     )
 
-    make_calendar_png(
-        counts=counts_pub,
-        start_date=start_date,
-        end_date=end_date,
-        png_out=args.png_out_pub,
-        title="Počty záznamů podle 'created' (publication_date 2021–2025)",
-        ignore_for_scale=ignore_date,
-    )
-
-    # HTML stránka s klikacími kalendáři
+    # HTML (klikací kalendář) + odkazy na PNG
     generate_html(
-        counts_all=counts_all,
-        counts_pub=counts_pub,
-        start_date=start_date,
-        end_date=end_date,
-        summary_from=summary_from,
-        html_out=args.html_out,
+        counts_all,
+        counts_pub,
+        start_date,
+        end_date,
+        summary_from,
+        html_out,
         nma_search_base=args.nma_search_base,
-        ignore_for_scale=ignore_date,
+        png_all=png_all_path.name,
+        png_pub=png_pub_path.name,
+        ignore_for_scale=ignore_for_scale,
     )
-
-    print(f"\nCSV (vše):          {args.csv_out}")
-    print(f"JSON (vše):         {args.json_out}")
-    print(f"PNG (vše):          {args.png_out}")
-    print(f"CSV (pub 21–25):    {args.csv_out_pub}")
-    print(f"JSON (pub 21–25):   {args.json_out_pub}")
-    print(f"PNG (pub 21–25):    {args.png_out_pub}")
-    print(f"HTML kalendáře:     {args.html_out}")
 
 
 if __name__ == "__main__":
