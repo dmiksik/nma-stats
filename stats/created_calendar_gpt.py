@@ -270,7 +270,12 @@ def generate_html(
     - counts_pub = jen publication_date 2021–2025
     """
 
-    def build_calendar_section(title: str, counts: dict[date, int]):
+    def build_calendar_section(title: str, counts: dict[date, int], filter_query: str | None = None):
+        """
+        filter_query – volitelný kus dotazu, který se přidá za created:
+        např. "metadata.publication_date:[2021 TO 2025]"
+        → výsledný dotaz: created:[... TO ...] AND metadata.publication_date:[2021 TO 2025]
+        """
         vmin, vmax = compute_scale(counts, start_date, end_date, ignore_for_scale)
 
         # dny v pořadí
@@ -280,7 +285,6 @@ def generate_html(
             count = counts.get(current, 0)
             color_hex = color_for_value(count, vmin, vmax)
             # textová barva
-            # (přepočet hex -> RGB)
             rgb = (
                 int(color_hex[1:3], 16),
                 int(color_hex[3:5], 16),
@@ -296,8 +300,12 @@ def generate_html(
             date_label = f"{current.day}.{current.month}."
             date_iso = current.isoformat()
 
-            # odkaz do NMA: created:[YYYY-MM-DD TO YYYY-MM-DD]
-            term = f"created:[{date_iso} TO {date_iso}]"
+            # základ dotazu: created:[YYYY-MM-DD TO YYYY-MM-DD]
+            if filter_query:
+                term = f"created:[{date_iso} TO {date_iso}] AND {filter_query}"
+            else:
+                term = f"created:[{date_iso} TO {date_iso}]"
+
             q = quote(term, safe="")
             url = f"{nma_search_base}?q={q}"
 
@@ -490,9 +498,11 @@ def generate_html(
       <span>méně záznamů → více záznamů</span>
     </div>
 
-    {build_calendar_section("Všechny záznamy (pole created)", counts_all)}
+    {build_calendar_section("Všechny záznamy (pole created)", counts_all, None)}
 
-    {build_calendar_section("Jen záznamy s metadata.publication_date v letech 2021–2025", counts_pub)}
+    {build_calendar_section("Jen záznamy s metadata.publication_date v letech 2021–2025",
+                            counts_pub,
+                            "metadata.publication_date:[2021 TO 2025]")}
 
     <p class="meta">
       Data: JSONL sklizeň z <a href="https://nma.eosc.cz" target="_blank" rel="noopener">NMA</a>.
@@ -506,7 +516,6 @@ def generate_html(
     Path(html_out).parent.mkdir(parents=True, exist_ok=True)
     with open(html_out, "w", encoding="utf-8") as f:
         f.write(html)
-
 
 def main():
     args = parse_args()
