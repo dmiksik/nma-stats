@@ -7,13 +7,11 @@ from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, Tuple
-
 from urllib.parse import quote
 
-import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
+import matplotlib.pyplot as plt
 import numpy as np
-
 
 # EOSC barvy
 EOSC_GREY = "#e4e4e3"
@@ -133,7 +131,6 @@ def compute_scale(
     vmin = min(vals)
     vmax = max(vals)
     if vmin == vmax:
-        # zabránit delení nulou; posunout trochu
         vmin = 0
         vmax = max(vmax, 1)
     return vmin, vmax
@@ -153,7 +150,6 @@ def color_for_value(value: int, vmin: int, vmax: int) -> str:
 def text_color_for_rgb(rgb: Tuple[int, int, int]) -> str:
     """Černý nebo bílý text podle jasu pozadí."""
     r, g, b = rgb
-    # jednoduchý luminance odhad
     luminance = 0.299 * r + 0.587 * g + 0.114 * b
     return "black" if luminance > 140 else "white"
 
@@ -191,20 +187,17 @@ def save_calendar_png(
     fig_height = max(3.0, num_weeks * 0.6 + 1.5)
     fig, ax = plt.subplots(figsize=(10, fig_height))
 
-    im = ax.imshow(values, cmap=EOSC_CMAP, aspect="auto", vmin=vmin, vmax=vmax)
+    ax.imshow(values, cmap=EOSC_CMAP, aspect="auto", vmin=vmin, vmax=vmax)
 
-    # Osy
     ax.set_xticks(range(7))
     ax.set_xticklabels(["Po", "Út", "St", "Čt", "Pá", "So", "Ne"])
     ax.set_yticks([])
 
     ax.set_title(title)
 
-    # Popisky v buňkách
     for week in range(num_weeks):
         for dow in range(7):
             cnt = int(values[week, dow])
-            # pozadí
             color_hex = color_for_value(cnt, vmin, vmax)
             r = int(color_hex[1:3], 16)
             g = int(color_hex[3:5], 16)
@@ -218,7 +211,6 @@ def save_calendar_png(
             if norm > 0.66:
                 text_color = "white"
 
-            # datum
             ax.text(
                 dow,
                 week - 0.15,
@@ -228,7 +220,6 @@ def save_calendar_png(
                 fontsize=6,
                 color=text_color,
             )
-            # počet
             ax.text(
                 dow,
                 week + 0.18,
@@ -239,7 +230,6 @@ def save_calendar_png(
                 color=text_color,
             )
 
-    # mřížka "čtverečků"
     ax.set_xticks(np.arange(-0.5, 7, 1), minor=True)
     ax.set_yticks(np.arange(-0.5, num_weeks, 1), minor=True)
     ax.grid(which="minor", color="white", linewidth=0.5)
@@ -267,7 +257,19 @@ def generate_html(
     a případně odkazy na PNG grafy.
     """
 
-    def section_calendar(title: str, counts: Dict[date, int], filter_query: str | None):
+    def section_calendar(kind: str, counts: Dict[date, int], filter_query: str | None):
+        # součet všech záznamů v dané větvi
+        total = sum(counts.values())
+        if kind == "all":
+            heading = f"Všechny záznamy, celkový počet: {format_int_cz(total)}"
+        elif kind == "pub":
+            heading = (
+                "Jen záznamy s rokem zveřejnění (metadata.publication_date) "
+                f"2021–2025, celkový počet: {format_int_cz(total)}"
+            )
+        else:
+            heading = f"{kind}, celkový počet: {format_int_cz(total)}"
+
         vmin, vmax = compute_scale(counts, start_date, end_date, ignore_for_scale)
 
         days_html = []
@@ -303,7 +305,7 @@ def generate_html(
                 f'style="background-color: {color_hex}; color: {text_color};">'
                 f'<span class="date">{date_label}</span>'
                 f'<span class="count">{format_int_cz(cnt)}</span>'
-                f'</a>'
+                f"</a>"
             )
             current += timedelta(days=1)
 
@@ -313,34 +315,35 @@ def generate_html(
         )
 
         return (
-            f'<section class="calendar-section">\n'
-            f'  <h2>{title}</h2>\n'
-            f'  <p class="hint">Kliknutím na den se otevře vyhledávání v NMA pro dané datum.</p>\n'
-            f'  <div class="calendar-grid">\n'
-            f'{dow_header}\n'
+            '<section class="calendar-section">\n'
+            f"  <h2>{heading}</h2>\n"
+            '  <p class="hint">Kliknutím na den se otevře vyhledávání v NMA pro dané datum.</p>\n'
+            '  <div class="calendar-grid">\n'
+            f"{dow_header}\n"
             f'{"".join(days_html)}\n'
-            f'  </div>\n'
-            f'</section>\n'
+            "  </div>\n"
+            "</section>\n"
         )
 
     updated = datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S UTC")
 
     extra_png_section = ""
-    if png_all or png_pub:
-        items = []
-        if png_all:
-            items.append(
-                f'<li><a href="{png_all}">PNG: všechny záznamy (created)</a></li>'
-            )
-        if png_pub:
-            items.append(
-                f'<li><a href="{png_pub}">PNG: jen metadata.publication_date 2021–2025</a></li>'
-            )
+    png_items = []
+    if png_all:
+        png_items.append(
+            f'<li><a href="{png_all}">PNG: všechny záznamy (created)</a></li>'
+        )
+    if png_pub:
+        png_items.append(
+            f'<li><a href="{png_pub}">PNG: jen metadata.publication_date 2021–2025</a></li>'
+        )
+    if png_items:
+        links_html = "\n      ".join(png_items)
         extra_png_section = (
-            "<section class=\"png-section\">\n"
+            '<section class="png-section">\n'
             "  <h2>Obrázky ke stažení</h2>\n"
             "  <ul>\n"
-            f"    {'\n    '.join(items)}\n"
+            f"      {links_html}\n"
             "  </ul>\n"
             "</section>\n"
         )
@@ -515,11 +518,11 @@ def generate_html(
       <span>méně záznamů → více záznamů</span>
     </div>
 
-    {section_calendar("Všechny záznamy (pole created)", counts_all, None)}
+    {section_calendar("all", counts_all, None)}
 
-    {section_calendar("Jen záznamy s metadata.publication_date v letech 2021–2025",
-                     counts_pub,
-                     "metadata.publication_date:[2021 TO 2025]")}
+    {section_calendar("pub",
+                      counts_pub,
+                      "metadata.publication_date:[2021 TO 2025]")}
 
     {extra_png_section}
 
@@ -640,6 +643,10 @@ def main():
 
     counts_all, counts_pub = collect_counts(input_path, start_date, end_date)
 
+    # součty pro popis
+    total_all = sum(counts_all.values())
+    total_pub = sum(counts_pub.values())
+
     # textové výstupy
     write_summaries(counts_all, counts_pub, summary_from, stats_dir)
 
@@ -652,7 +659,7 @@ def main():
         counts_all,
         start_date,
         end_date,
-        "Všechny záznamy (created)",
+        f"Všechny záznamy, celkový počet: {format_int_cz(total_all)}",
         png_all_path,
         ignore_for_scale=ignore_for_scale,
     )
@@ -660,7 +667,8 @@ def main():
         counts_pub,
         start_date,
         end_date,
-        "Jen metadata.publication_date 2021–2025",
+        "Jen záznamy s rokem zveřejnění (metadata.publication_date) 2021–2025, "
+        f"celkový počet: {format_int_cz(total_pub)}",
         png_pub_path,
         ignore_for_scale=ignore_for_scale,
     )
