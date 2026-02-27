@@ -47,3 +47,26 @@ jobs:
             --summary-from 2026-01-16 \
             --end-date $(date -u +%Y-%m-%d) \
             --html-out docs/index.html
+
+      - name: Commit and push updated stats
+        if: github.event_name != 'pull_request'
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Přidej to, co chceš mít verzované:
+          git add docs/index.html
+          git add docs/*png
+
+          # Pokud chceš mít v historii i sklizená data, odkomentuj:
+          git add records/*.jsonl.gz
+          git add stats/*.csv
+          git add stats/*.json
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update NMA harvest and stats [skip ci]"
+            git push
+          fi
