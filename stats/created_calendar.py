@@ -522,7 +522,7 @@ def generate_html(
 
     {section_calendar("pub",
                       counts_pub,
-                      "metadata.publication_date:[2021 TO 2025]")}
+                      "metadata.publication_date:[2021-01-01 TO 2025-12-31]")}
 
     {extra_png_section}
 
