@@ -3,6 +3,7 @@ import argparse
 import gzip
 import json
 import math
+import re
 from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -20,6 +21,8 @@ EOSC_PINK = "#ff5b7f"
 EOSC_CMAP = mcolors.LinearSegmentedColormap.from_list(
     "eosc", [EOSC_GREY, EOSC_GREEN, EOSC_PINK]
 )
+
+YEAR_RE = re.compile(r"^(\d{4})(?:-\d{2}-\d{2})?$")
 
 
 def open_any(path: Path):
@@ -62,25 +65,41 @@ def parse_created(rec: dict) -> date | None:
 
 
 def get_publication_year(rec: dict) -> int | None:
-    """Vrátí rok z metadata.publication_date, pokud jde rozumně přečíst."""
+    """Vrátí rok z metadata.publication_date, pokud má formát YYYY nebo YYYY-MM-DD
+    a jde rozumně přečíst. Jinak None.
+    """
     meta = rec.get("metadata") or {}
     pub = meta.get("publication_date")
-    if not pub or len(pub) < 4:
+
+    # Chceme jen textové hodnoty
+    if not isinstance(pub, str):
         return None
+
+    pub = pub.strip()
+    if not pub:
+        return None
+
+    m = YEAR_RE.match(pub)
+    if not m:
+        # Něco jiného než YYYY nebo YYYY-MM-DD – nepočítáme do větve B
+        return None
+
     try:
-        return int(pub[:4])
+        year = int(m.group(1))
     except ValueError:
         return None
+
+    return year
 
 
 def collect_counts(
     path: Path,
     start_date: date,
     end_date: date,
-    pub_year_min: int = 2021,
+    pub_year_min: int = 2016,
     pub_year_max: int = 2025,
 ) -> Tuple[Dict[date, int], Dict[date, int]]:
-    """Spočítá denní počty created pro všechny a pro 2021–2025."""
+    """Spočítá denní počty created pro všechny a pro roky publikace v intervalu."""
     counts_all: Counter[date] = Counter()
     counts_pub: Counter[date] = Counter()
 
@@ -253,7 +272,7 @@ def generate_html(
     ignore_for_scale: date | None = None,
 ):
     """
-    Vygeneruje HTML stránku se dvěma kalendáři (vše / 2021–2025)
+    Vygeneruje HTML stránku se dvěma kalendáři (vše / 2016–2025)
     a případně odkazy na PNG grafy.
     """
 
@@ -265,7 +284,7 @@ def generate_html(
         elif kind == "pub":
             heading = (
                 "Jen záznamy s rokem zveřejnění (metadata.publication_date) "
-                f"2021–2025, celkový počet: {format_int_cz(total)}"
+                f"2016–2025, celkový počet: {format_int_cz(total)}"
             )
         else:
             heading = f"{kind}, celkový počet: {format_int_cz(total)}"
@@ -335,7 +354,7 @@ def generate_html(
         )
     if png_pub:
         png_items.append(
-            f'<li><a href="{png_pub}">PNG: jen metadata.publication_date 2021–2025</a></li>'
+            f'<li><a href="{png_pub}">PNG: jen metadata.publication_date 2016–2025</a></li>'
         )
     if png_items:
         links_html = "\n      ".join(png_items)
@@ -522,7 +541,7 @@ def generate_html(
 
     {section_calendar("pub",
                       counts_pub,
-                      "metadata.publication_date:[2021-01-01 TO 2025-12-31]")}
+                      "metadata.publication_date:[2016-01-01 TO 2025-12-31]")}
 
     {extra_png_section}
 
@@ -548,6 +567,17 @@ def write_summaries(
 ):
     stats_dir.mkdir(parents=True, exist_ok=True)
 
+    # uklidíme staré soubory pro 2021–2025, pokud ještě existují
+    for old_name in [
+        "created_counts_pub_2021_2025.csv",
+        "created_counts_pub_2021_2025.json",
+    ]:
+        old_path = stats_dir / old_name
+        try:
+            old_path.unlink()
+        except FileNotFoundError:
+            pass
+
     def to_lines(counts: Dict[date, int]):
         for d in sorted(counts.keys()):
             if d < summary_from:
@@ -561,7 +591,7 @@ def write_summaries(
             f.write(f"{d.isoformat()},{cnt}\n")
 
     with open(
-        stats_dir / "created_counts_pub_2021_2025.csv", "w", encoding="utf-8"
+        stats_dir / "created_counts_pub_2016_2025.csv", "w", encoding="utf-8"
     ) as f:
         f.write("date,created_count\n")
         for d, cnt in to_lines(counts_pub):
@@ -581,7 +611,7 @@ def write_summaries(
         json.dump(json_all, f, ensure_ascii=False, indent=2)
 
     with open(
-        stats_dir / "created_counts_pub_2021_2025.json", "w", encoding="utf-8"
+        stats_dir / "created_counts_pub_2016_2025.json", "w", encoding="utf-8"
     ) as f:
         json.dump(json_pub, f, ensure_ascii=False, indent=2)
 
@@ -652,8 +682,16 @@ def main():
 
     # PNG do stejného adresáře jako HTML => docs/
     out_dir = html_out.parent
+
+    # uklidíme starý PNG pro 2021–2025, pokud existuje
+    old_png_pub = out_dir / "calendar_created_pub_2021_2025.png"
+    try:
+        old_png_pub.unlink()
+    except FileNotFoundError:
+        pass
+
     png_all_path = out_dir / "calendar_created_all.png"
-    png_pub_path = out_dir / "calendar_created_pub_2021_2025.png"
+    png_pub_path = out_dir / "calendar_created_pub_2016_2025.png"
 
     save_calendar_png(
         counts_all,
@@ -667,7 +705,7 @@ def main():
         counts_pub,
         start_date,
         end_date,
-        "Jen záznamy s rokem zveřejnění (metadata.publication_date) 2021–2025, "
+        "Jen záznamy s rokem zveřejnění (metadata.publication_date) 2016–2025, "
         f"celkový počet: {format_int_cz(total_pub)}",
         png_pub_path,
         ignore_for_scale=ignore_for_scale,
