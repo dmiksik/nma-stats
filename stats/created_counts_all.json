@@ -297,7 +297,7 @@
   },
   {
     "date": "2026-03-31",
-    "created_count": 10
+    "created_count": 5
   },
   {
     "date": "2026-04-01",
@@ -305,7 +305,7 @@
   },
   {
     "date": "2026-04-02",
-    "created_count": 3
+    "created_count": 1
   },
   {
     "date": "2026-04-03",
@@ -313,6 +313,10 @@
   },
   {
     "date": "2026-04-04",
+    "created_count": 0
+  },
+  {
+    "date": "2026-04-05",
     "created_count": 0
   }
 ]
