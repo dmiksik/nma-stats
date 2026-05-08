@@ -441,10 +441,14 @@
   },
   {
     "date": "2026-05-06",
-    "created_count": 2
+    "created_count": 0
   },
   {
     "date": "2026-05-07",
+    "created_count": 0
+  },
+  {
+    "date": "2026-05-08",
     "created_count": 0
   }
 ]
