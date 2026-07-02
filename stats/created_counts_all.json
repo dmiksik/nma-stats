@@ -637,7 +637,7 @@
   },
   {
     "date": "2026-06-24",
-    "created_count": 1
+    "created_count": 0
   },
   {
     "date": "2026-06-25",
@@ -665,6 +665,10 @@
   },
   {
     "date": "2026-07-01",
+    "created_count": 2
+  },
+  {
+    "date": "2026-07-02",
     "created_count": 0
   }
 ]
