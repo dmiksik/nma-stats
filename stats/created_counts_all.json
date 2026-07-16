@@ -717,10 +717,14 @@
   },
   {
     "date": "2026-07-14",
-    "created_count": 2
+    "created_count": 1
   },
   {
     "date": "2026-07-15",
+    "created_count": 1
+  },
+  {
+    "date": "2026-07-16",
     "created_count": 0
   }
 ]
